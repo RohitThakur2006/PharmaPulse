@@ -126,6 +126,26 @@ def seed_sample_inventory(db_path: Path = None):
         db_path=db_path
     )
 
+    # 6. Analgesics Salicylic (N02BA): normal healthy stock
+    add_batch(
+        batch_id="N02BA-2019-01",
+        product_id=products['N02BA'],
+        initial_qty=110,
+        received_date="2019-06-15",
+        expiry_date="2020-06-15",
+        db_path=db_path
+    )
+
+    # 7. Psycholeptics Hypnotics (N05C): low-volume category, small stock
+    add_batch(
+        batch_id="N05C-2019-01",
+        product_id=products['N05C'],
+        initial_qty=25,
+        received_date="2019-07-20",
+        expiry_date="2020-07-20",
+        db_path=db_path
+    )
+
     conn.close()
     print("Database successfully initialized and seeded with sample inventory!")
 

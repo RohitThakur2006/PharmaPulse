@@ -268,15 +268,10 @@ for prod in products_db:
         })
 
     # Add to complete catalog
-    # Dynamic demand uncertainty range (+/- 12% rather than flat +/- 35)
-    range_min = max(0, int(demand_28d * 0.88))
-    range_max = int(demand_28d * 1.12)
-
     all_inventory_rows.append({
         "Medicine": p_name,
         "Current Stock": total_stock,
         "Forecast (28d)": demand_28d,
-        "Forecast Range": f"{range_min} - {range_max}",
         "Stock Coverage": f"{reorder_eval['days_of_inventory']} days",
         "Reorder Status": reorder_eval['reorder_badge'],
         "Expiry Status": "🔴 Expiring Unsold" if prod_waste > 0 else "🟢 Safe"
@@ -347,13 +342,13 @@ with tab_alerts:
     
     # EXPLAINABILITY ACCORDION (Acceptance Test #4)
     with st.expander("🔍 View AI Model Explainability & Drivers"):
-        st.write("""
-        **How the CatBoost model forecasts demand:**
-        1. **Recent Momentum (30% weight):** Sales over the past 1 week and 4 weeks are the strongest immediate drivers.
-        2. **Long-Run Baseline (25% weight):** 52-week moving average provides the stable volume floor for each category.
-        3. **Seasonal Adjustments (12% weight):** Detects winter respiratory medication spikes and spring allergy surges.
-        4. **Uncertainty Bounds:** Displayed ranges reflect dynamic ±12% volatility bounds calculated from historical residuals.
-        """)
+        st.write("**How the CatBoost model forecasts demand:** feature importance read live from the saved model (all 8 categories combined).")
+        importances = model.get_feature_importance()
+        drivers = pd.DataFrame({
+            "Driver": FEATURE_COLUMNS,
+            "Importance (%)": (importances / importances.sum() * 100).round(1)
+        }).sort_values("Importance (%)", ascending=False)
+        st.dataframe(drivers, use_container_width=True, hide_index=True)
 
 # -----------------------------------------------------------------------------
 # TAB 2: INVENTORY & BATCH DETAILS

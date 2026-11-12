@@ -29,7 +29,7 @@ This tool provides data-driven answers to both questions. It is **advisory only*
 | **Target variable** | `will_waste` = 1 if any units remain unsold at batch expiry date, else 0 |
 | **Risk rule** | `remaining_batch_stock > forecasted_demand_until_expiry` → Flag = 1 (At Risk) |
 | **Depletion method** | FEFO (First Expiring, First Out): demand is allocated to the earliest-expiring batch first |
-| **Flag window** | Batches expiring within the next 60 days from prediction date |
+| **Flag window** | Batches expiring within the next 28 days from prediction date |
 
 ### 2.3 Why the Risk Rule Is Not a Separate ML Model
 

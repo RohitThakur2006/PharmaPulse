@@ -109,6 +109,21 @@ def evaluate_batch_expiry_fefo(
         days_to_expiry = max(0, (exp_date - as_of).days)
         stock = b['quantity_on_hand']
 
+        # Stock already past its expiry date is waste, not a forecast
+        if exp_date < as_of:
+            evaluated.append({
+                'batch_id': b['batch_id'],
+                'expiry_date': b['expiry_date'],
+                'days_to_expiry': days_to_expiry,
+                'current_stock': stock,
+                'forecast_demand_window': 0.0,
+                'expected_waste_units': stock,
+                'expiry_flag': 'EXPIRED',
+                'expiry_badge': '⚫ Already Expired',
+                'advisory_action': f'Remove from shelf: batch expired on {exp_date.date()}.'
+            })
+            continue
+
         # Batches expiring beyond the horizon are safe for now
         if days_to_expiry > horizon_days:
             evaluated.append({
