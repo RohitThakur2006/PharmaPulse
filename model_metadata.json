@@ -1,0 +1,28 @@
+{
+    "model_name": "CatBoostRegressor",
+    "target": "target_next_28d",
+    "horizon_days": 28,
+    "frequency": "weekly_sliding_window",
+    "test_wape_percent": 17.13,
+    "test_mae_units": 35.13,
+    "feature_columns": [
+        "sales_last_1w",
+        "sales_last_2w",
+        "sales_last_4w",
+        "sales_same_week_last_year",
+        "sales_last_28d",
+        "avg_last_90d",
+        "avg_last_365d",
+        "volatility_weekly_sales",
+        "season_Spring",
+        "season_Summer",
+        "season_Winter",
+        "category_M01AE_Anti_Inflammatory_Propionic",
+        "category_N02BA_Analgesics_Salicylic",
+        "category_N02BE_Analgesics_Paracetamol_Anilides",
+        "category_N05B_Psycholeptics_Anxiolytics",
+        "category_N05C_Psycholeptics_Hypnotics_Sedatives",
+        "category_R03_Respiratory_Airway_Diseases",
+        "category_R06_Antihistamines_Systemic"
+    ]
+}
