@@ -133,6 +133,13 @@ model = get_model()
 # -----------------------------------------------------------------------------
 # 3. HEADER & ADVISORY BANNER
 # -----------------------------------------------------------------------------
+# Date is limited to the stored sales history so forecasts can never be stale
+conn = get_connection()
+bounds = conn.execute("SELECT MIN(sale_date) AS lo, MAX(sale_date) AS hi FROM daily_sales;").fetchone()
+conn.close()
+data_min = pd.to_datetime(bounds['lo']).date() if bounds['lo'] else None
+data_max = pd.to_datetime(bounds['hi']).date() if bounds['hi'] else None
+
 col_header, col_date = st.columns([3, 1])
 with col_header:
     st.markdown("## 💊 PharmaPulse Decision Support")
@@ -141,8 +148,10 @@ with col_header:
 with col_date:
     as_of_date = st.date_input(
         "Current Operational Date",
-        value=date(2019, 10, 1),
-        help="Simulated point-in-time date for historical testing and live operations."
+        value=data_max or date(2019, 10, 1),
+        min_value=data_min,
+        max_value=data_max,
+        help="Limited to the dates covered by stored sales history."
     )
 
 st.markdown("""
