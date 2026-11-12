@@ -113,9 +113,9 @@ def log_sale_atomic(product_id: int, sale_date: str, units_requested: float, db_
         cursor.execute("""
         SELECT batch_id, quantity_on_hand, expiry_date 
         FROM inventory_batches 
-        WHERE product_id = ? AND quantity_on_hand > 0 
+        WHERE product_id = ? AND quantity_on_hand > 0 AND received_date <= ?
         ORDER BY expiry_date ASC;
-        """, (product_id,))
+        """, (product_id, sale_date))
         batches = cursor.fetchall()
 
         units_left_to_fill = units_requested
@@ -172,14 +172,15 @@ def add_batch(batch_id: str, product_id: int, initial_qty: float, received_date:
     cursor = conn.cursor()
     try:
         cursor.execute("""
-        INSERT INTO inventory_batches (batch_id, product_id, initial_quantity, quantity_on_hand, received_date, expiry_date)
+        INSERT OR IGNORE INTO inventory_batches (batch_id, product_id, initial_quantity, quantity_on_hand, received_date, expiry_date)
         VALUES (?, ?, ?, ?, ?, ?);
         """, (batch_id, product_id, initial_qty, initial_qty, received_date, expiry_date))
 
-        cursor.execute("""
-        INSERT INTO stock_movements (batch_id, movement_date, movement_type, quantity_change, notes)
-        VALUES (?, ?, 'DELIVERY', ?, 'Supplier delivery receipt');
-        """, (batch_id, received_date, initial_qty))
+        if cursor.rowcount > 0:
+            cursor.execute("""
+            INSERT INTO stock_movements (batch_id, movement_date, movement_type, quantity_change, notes)
+            VALUES (?, ?, 'DELIVERY', ?, 'Supplier delivery receipt');
+            """, (batch_id, received_date, initial_qty))
 
         conn.commit()
     except Exception as e:

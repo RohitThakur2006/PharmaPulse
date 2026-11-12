@@ -4,7 +4,44 @@ Clearly marked as synthetic sample inventory for demo and testing.
 """
 
 from pathlib import Path
+import pandas as pd
+
 from db import init_db, seed_products, add_batch, get_connection
+from features import CATEGORY_MAPPING
+
+SALES_CSV = Path(__file__).resolve().parent.parent / "data" / "salesdaily.csv"
+
+def seed_sales_history(db_path: Path = None):
+    """Loads the real Pharma Sales daily history (8 ATC categories) into daily_sales."""
+    if db_path is None:
+        from db import DB_PATH
+        db_path = DB_PATH
+
+    df = pd.read_csv(SALES_CSV, parse_dates=['datum'])
+    df = df.melt(
+        id_vars='datum',
+        value_vars=list(CATEGORY_MAPPING),
+        var_name='atc_code',
+        value_name='units_sold'
+    )
+
+    conn = get_connection(db_path)
+    prods = {
+        row['atc_code']: row['product_id']
+        for row in conn.execute("SELECT product_id, atc_code FROM products;")
+    }
+
+    conn.executemany("""
+    INSERT OR IGNORE INTO daily_sales (product_id, sale_date, units_sold, unmet_demand)
+    VALUES (?, ?, ?, 0);
+    """, [
+        (prods[atc], date.strftime('%Y-%m-%d'), float(units))
+        for atc, date, units in zip(df['atc_code'], df['datum'], df['units_sold'])
+    ])
+
+    conn.commit()
+    conn.close()
+    print(f"Seeded {len(df):,} daily sales rows from {SALES_CSV.name}.")
 
 def seed_sample_inventory(db_path: Path = None):
     """Populates realistic initial inventory batches covering all operational scenarios."""
@@ -17,6 +54,9 @@ def seed_sample_inventory(db_path: Path = None):
     
     print("Seeding products table (8 ATC categories)...")
     seed_products(db_path)
+
+    print("Seeding daily sales history...")
+    seed_sales_history(db_path)
 
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -87,7 +127,7 @@ def seed_sample_inventory(db_path: Path = None):
     )
 
     conn.close()
-    print("✅ Database successfully initialized and seeded with sample inventory!")
+    print("Database successfully initialized and seeded with sample inventory!")
 
 if __name__ == "__main__":
     seed_sample_inventory()

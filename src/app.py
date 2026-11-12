@@ -12,7 +12,7 @@ import json
 
 from db import get_connection, log_sale_atomic, add_batch, DB_PATH
 from engine import evaluate_reorder_risk, evaluate_batch_expiry_fefo
-from features import ALL_CATEGORIES
+from features import prepare_inference_row, FEATURE_COLUMNS
 
 # -----------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION & THEME
@@ -162,7 +162,12 @@ batches_df = pd.read_sql_query("""
            b.quantity_on_hand, b.initial_quantity, b.expiry_date, b.received_date
     FROM inventory_batches b
     JOIN products p ON b.product_id = p.product_id
-    WHERE b.quantity_on_hand > 0;
+    WHERE b.quantity_on_hand > 0 AND b.received_date <= ?;
+""", conn, params=(str(as_of_date),))
+sales_df = pd.read_sql_query("""
+    SELECT s.sale_date as datum, p.category_full_name as category, s.units_sold
+    FROM daily_sales s
+    JOIN products p ON s.product_id = p.product_id;
 """, conn)
 conn.close()
 
@@ -170,21 +175,24 @@ if not products_db:
     st.error("Database is empty. Please run `python src/seed_db.py` to initialize products and sample inventory.")
     st.stop()
 
+if model is None:
+    st.error("Model artifact `pharma_catboost_demand_model.pkl` could not be loaded. Check that `catboost` and `joblib` are installed.")
+    st.stop()
+
+if sales_df.empty:
+    st.error("No sales history found. Please run `python src/seed_db.py` to load daily sales.")
+    st.stop()
+
+# Live 28-day forecasts per category using only sales history up to the operational date
+feature_row = prepare_inference_row(sales_df, as_of_date)
+if feature_row[FEATURE_COLUMNS].isna().any().any():
+    st.error(f"Not enough sales history before {as_of_date} to build features (52 weeks required).")
+    st.stop()
+forecast_map = dict(zip(feature_row['category'], model.predict(feature_row[FEATURE_COLUMNS])))
+
 # -----------------------------------------------------------------------------
 # 5. CORE DECISION EVALUATION (TRIAGE)
 # -----------------------------------------------------------------------------
-# Baseline 28-day demand volumes for the 8 categories (derived from validated model)
-REFERENCE_VOLUMES = {
-    'M01AB_Anti_Inflammatory_Acetic': 150.0,
-    'M01AE_Anti_Inflammatory_Propionic': 105.0,
-    'N02BA_Analgesics_Salicylic': 88.0,
-    'N02BE_Analgesics_Paracetamol_Anilides': 745.0,
-    'N05B_Psycholeptics_Anxiolytics': 235.0,
-    'N05C_Psycholeptics_Hypnotics_Sedatives': 20.0,
-    'R03_Respiratory_Airway_Diseases': 185.0,
-    'R06_Antihistamines_Systemic': 115.0
-}
-
 triage_summary = []
 all_inventory_rows = []
 total_units_wasting_soon = 0.0
@@ -199,7 +207,7 @@ for prod in products_db:
 
     prod_batches = batches_df[batches_df['product_id'] == p_id].to_dict('records') if not batches_df.empty else []
     total_stock = sum(b['quantity_on_hand'] for b in prod_batches)
-    demand_28d = REFERENCE_VOLUMES.get(p_cat, 120.0)
+    demand_28d = max(0.0, float(forecast_map[p_cat]))
 
     # 1. Evaluate Reorder Need
     reorder_eval = evaluate_reorder_risk(

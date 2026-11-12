@@ -27,13 +27,12 @@ def evaluate_reorder_risk(
     Formula:
     Daily Run-rate = predicted_28d_demand / 28
     Days of Inventory (DOI) = total_stock_on_hand / Daily Run-rate
-    Reorder Threshold = (lead_time_days + safety_stock_days) * Daily Run-rate
+    Critical if stock covers less than the delivery lead time; Reorder if stock
+    cannot cover the full 28-day forecast.
     """
     daily_rate = max(0.01, predicted_28d_demand / 28.0)
     doi = total_stock_on_hand / daily_rate
 
-    # Demand required during delivery lead time + safety cushion
-    reorder_point = (lead_time_days + safety_stock_days) * daily_rate
     shortage_28d = max(0.0, predicted_28d_demand - total_stock_on_hand)
 
     # Uncertainty bounds
@@ -47,11 +46,11 @@ def evaluate_reorder_risk(
             f"Stock will run out in ~{doi:.1f} days, before standard {lead_time_days}-day delivery! "
             f"Recommended order: ~{shortage_28d + (safety_stock_days * daily_rate):.0f} units immediately."
         )
-    elif total_stock_on_hand < reorder_point:
+    elif total_stock_on_hand < predicted_28d_demand:
         flag = "REORDER_SOON"
         badge = "🟡 Reorder Warning"
         guidance = (
-            f"Current stock covers ~{doi:.1f} days. Approaching reorder threshold. "
+            f"Current stock covers ~{doi:.1f} days, less than the 28-day forecast. "
             f"Plan replenishment of ~{shortage_28d + (safety_stock_days * daily_rate):.0f} units within the week."
         )
     elif total_stock_on_hand > (predicted_28d_demand * 2.5):

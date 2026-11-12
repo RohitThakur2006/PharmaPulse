@@ -21,6 +21,20 @@ CATEGORY_MAPPING = {
 # The 8 reference category names
 ALL_CATEGORIES = list(CATEGORY_MAPPING.values())
 
+# Exact feature order the saved CatBoost artifact was trained on (see model_metadata.json)
+FEATURE_COLUMNS = [
+    'sales_last_1w', 'sales_last_2w', 'sales_last_4w', 'sales_same_week_last_year',
+    'sales_last_28d', 'avg_last_90d', 'avg_last_365d', 'volatility_weekly_sales',
+    'season_Spring', 'season_Summer', 'season_Winter',
+    'category_M01AE_Anti_Inflammatory_Propionic',
+    'category_N02BA_Analgesics_Salicylic',
+    'category_N02BE_Analgesics_Paracetamol_Anilides',
+    'category_N05B_Psycholeptics_Anxiolytics',
+    'category_N05C_Psycholeptics_Hypnotics_Sedatives',
+    'category_R03_Respiratory_Airway_Diseases',
+    'category_R06_Antihistamines_Systemic',
+]
+
 def get_season(month: int) -> str:
     """Map calendar month to meteorological season."""
     if month in [12, 1, 2]:
@@ -63,13 +77,14 @@ def build_features_for_category(category_weekly: pd.DataFrame) -> pd.DataFrame:
 def prepare_inference_row(history_df: pd.DataFrame, as_of_date: pd.Timestamp) -> pd.DataFrame:
     """
     Given a daily sales history table up to `as_of_date`,
-    prepares the exact 19 feature columns required by CatBoost for all 8 categories.
+    prepares the exact 18 feature columns required by CatBoost for all 8 categories.
     
     Expected input columns: ['datum', 'category', 'units_sold']
     """
     # 1. Filter strictly up to as_of_date (yesterday cutoff)
-    df = history_df[history_df['datum'] <= as_of_date].copy()
+    df = history_df.copy()
     df['datum'] = pd.to_datetime(df['datum'])
+    df = df[df['datum'] <= pd.to_datetime(as_of_date)]
 
     rows = []
     for cat in ALL_CATEGORIES:
