@@ -49,27 +49,33 @@
 - [x] Unit test cumulative FEFO allocation against core scenarios (`tests/test_engine.py`)
 - [x] Implement database schema with atomic transactions and audit ledger (`src/db.py`)
 - [x] Implement realistic sample inventory seeding (`src/seed_db.py`)
-- [ ] Batch history generation with ground truth labels (`src/generate_batches.py`)
-- [ ] Evaluate batch flags: Confusion Matrix, Precision, Recall, F1-Score
+- [x] Batch history generation with ground truth labels (`pharmacy_test_logic.db`, `build_test_data.py`)
+- [x] Synthetic test history generation (`pharmacy_test_model.db`, `build_test_data.py`)
+- [x] Tier 1 forecast evaluation vs Naive & Last-Year baselines across 52 rolling origins (`src/evaluate.py model`)
+- [x] Tier 2 expiry risk evaluation with Confusion Matrix, Precision (0.835), Recall (0.864), F1 (0.850) (`src/evaluate.py logic`)
+- [x] MLflow experiment tracking integration (`mlflow.db`, `mlruns/`, CSV artifacts in `reports/`)
 
 ## Phase 4: Inference Interface (Streamlit App)
-- [x] Build Streamlit app (`src/app.py`)
-- [x] Load saved model artifact — live inference ready
-- [x] Accept inventory input (log daily sales + receive delivery forms)
-- [x] Display category-level demand forecasts
-- [x] Display independent Reorder & Expiry badges with color + emoji + text
-- [x] Display FEFO batch risk breakdown with surplus waste quantities
-- [x] Permanent advisory disclaimer banner on every screen
-- [x] Model uncertainty intervals (±MAE) displayed on dashboard
-- [x] Feature explainability section (top drivers) for Acceptance Test #4
+- [x] Build Streamlit app (`src/app.py`) with SaaS Forest Green & Electric Purple theme
+- [x] Load saved model artifact — live inference across 8 ATC categories
+- [x] 38 Essential Indian Household Medicines mapped to formulary with brand-share demand scaling
+- [x] Display category-level & brand-level demand forecasts with empirical uncertainty bounds (`±MODEL_MAE × brand_share`)
+- [x] Three prominent top navigation venues:
+  - Panel 1: Clinical Triage & Alerts (Spotlight Action card, 4-filter triage strip, stock runway meters, FEFO batch drawers)
+  - Panel 2: Full Inventory & Batches (Venue 1: 38-medicine formulation catalog, Venue 2: Physical batch depletion ledger)
+  - Panel 3: Dispensing Ledger (Operation 1: Comprehensive day-end bulk dispensing sheet, Operation 2: Receive new batch, Operation 3: Register brand-new medicine)
+- [x] Real-time atomic FEFO stock deduction and audit logging
+- [x] Permanent clinical decision-support advisory notice on all panels
 
 ## Phase 5: Reproducibility, Tests & Documentation
-- [x] Create `requirements.txt` with dependencies
-- [x] Create `.gitignore` (ignore `pharmacy.db`, caches, checkpoints)
+- [x] Create `requirements.txt` with dependencies (including `mlflow`, `joblib`, `catboost`)
+- [x] Create `.gitignore` (ignore `pharmacy.db`, caches, checkpoints, test DBs)
 - [x] Unit tests for decision engine (`tests/test_engine.py`)
-- [ ] Create `README.md` with setup, data prep, training, and inference commands
-- [ ] Create `.env.example` (placeholder, no real credentials)
-- [ ] Write technical report (EDA, target, features, baseline, comparison, split, metrics, error analysis, limitations)
+- [x] Unit tests for atomic bulk dispensing (`tests/test_db_bulk.py`)
+- [ ] Consolidate training pipeline into `src/train.py` (reproducible training script)
+- [ ] Create `README.md` with setup, evaluation, and dashboard instructions
+- [ ] Create `.env.example` (environment configuration template)
+- [ ] Write comprehensive technical report (`REPORT.md`)
 - [ ] Record 3–5 minute demo video
 
 ## Phase 6: Submission
@@ -84,9 +90,9 @@
 
 | Criterion (Marks) | Status | Evidence |
 |:---|:---:|:---|
-| Problem framing, data sourcing & EDA (15) | 🟡 Partial | Target/horizon defined, dataset sourced, EDA done in notebooks — needs consolidation |
-| Baseline & model development (25) | ✅ Done | 6 models compared, hyperparameter tuning, feature engineering |
-| Validation & metrics (20) | 🟡 Partial | Demand metrics done — expiry Precision/Recall/F1 pending |
-| Inference interface (15) | ⏳ Not started | Streamlit app planned |
-| Explainability & responsible use (10) | 🟡 Partial | Feature importance done, limitations listed — needs bias/privacy discussion |
-| Reproducibility, tests & documentation (15) | ⏳ Not started | Needs scripts, tests, README, requirements.txt |
+| Problem framing, data sourcing & EDA (15) | 🟡 Partial | Target/horizon defined, 8 ATC categories, EDA done — report writeup pending |
+| Baseline & model development (25) | ✅ Done | 6 models compared, tuned CatBoost (WAPE 17.18%), feature importance, rolling origins |
+| Validation & metrics (20) | ✅ Done | MLflow tracking (`mlflow.db`), Tier 1 demand metrics vs 2 baselines, Tier 2 F1 0.850 / Precision 0.835 / Recall 0.864 |
+| Inference interface (15) | ✅ Done | Full Streamlit decision-support dashboard (`app.py`), 3 panels, 38 Indian brands, bulk POS sheet |
+| Explainability & responsible use (10) | ✅ Done | Feature drivers, clinical advisory disclaimers, honest ±MAE uncertainty bounds, error analysis (0.5×/0.9× phenomena) |
+| Reproducibility, tests & documentation (15) | 🟡 Partial | 4/4 pytest suites passing, requirements.txt, .gitignore done — README.md & train.py pending |
