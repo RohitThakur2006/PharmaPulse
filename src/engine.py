@@ -109,8 +109,8 @@ def evaluate_batch_expiry_fefo(
         days_to_expiry = max(0, (exp_date - as_of).days)
         stock = b['quantity_on_hand']
 
-        # Stock already past its expiry date is waste, not a forecast
-        if exp_date < as_of:
+        # Stock already past or at its expiry date is waste, not a forecast
+        if exp_date <= as_of:
             evaluated.append({
                 'batch_id': b['batch_id'],
                 'expiry_date': b['expiry_date'],
@@ -120,7 +120,7 @@ def evaluate_batch_expiry_fefo(
                 'expected_waste_units': stock,
                 'expiry_flag': 'EXPIRED',
                 'expiry_badge': '⚫ Already Expired',
-                'advisory_action': f'Remove from shelf: batch expired on {exp_date.date()}.'
+                'advisory_action': f'Quarantine & discard: batch expired on {exp_date.date()}. Do not dispense.'
             })
             continue
 

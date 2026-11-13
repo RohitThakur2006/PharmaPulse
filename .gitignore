@@ -1,5 +1,6 @@
 # Database
 pharmacy.db
+pharmacy_test_*.db
 *.sqlite3
 
 # Python artifacts
