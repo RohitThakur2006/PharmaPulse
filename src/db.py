@@ -262,3 +262,116 @@ def add_batch(batch_id: str, product_id: int, initial_qty: float, received_date:
         raise e
     finally:
         conn.close()
+
+def log_sales_bulk_atomic(sales_list: List[Dict[str, Any]], sale_date: str, db_path: Path = DB_PATH) -> Dict[str, Any]:
+    """
+    Atomically processes a list of dispensing entries for a given sale date:
+    sales_list: [{'product_id': int, 'product_name': str, 'units': float}, ...]
+    
+    Guarantees ACID transactions:
+    All deductions across physical batches and daily_sales updates occur in a SINGLE transaction.
+    If any single deduction fails, the entire transaction is rolled back with zero partial state.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    try:
+        total_dispensed = 0.0
+        total_unmet = 0.0
+        processed_items = []
+        
+        for item in sales_list:
+            p_id = int(item['product_id'])
+            p_name = item.get('product_name', f'Product #{p_id}')
+            units_requested = float(item['units'])
+            if units_requested <= 0:
+                continue
+                
+            cursor.execute("""
+            SELECT batch_id, quantity_on_hand, expiry_date 
+            FROM inventory_batches 
+            WHERE product_id = ? AND quantity_on_hand > 0 AND received_date <= ?
+            ORDER BY expiry_date ASC;
+            """, (p_id, sale_date))
+            batches = cursor.fetchall()
+
+            units_left_to_fill = units_requested
+            actual_units_dispensed = 0.0
+            batches_depleted = []
+
+            for b in batches:
+                if units_left_to_fill <= 0:
+                    break
+                
+                b_id = b['batch_id']
+                b_stock = float(b['quantity_on_hand'])
+                b_exp = b['expiry_date']
+
+                deduct = min(b_stock, units_left_to_fill)
+                new_stock = b_stock - deduct
+                
+                cursor.execute("UPDATE inventory_batches SET quantity_on_hand = ? WHERE batch_id = ?", (new_stock, b_id))
+                
+                cursor.execute("""
+                INSERT INTO stock_movements (batch_id, movement_date, movement_type, quantity_change, notes)
+                VALUES (?, ?, 'SALE', ?, 'Daily bulk POS dispensing');
+                """, (b_id, sale_date, -deduct))
+
+                units_left_to_fill -= deduct
+                actual_units_dispensed += deduct
+                batches_depleted.append({
+                    'batch_id': b_id,
+                    'deducted': deduct,
+                    'remaining': new_stock,
+                    'expiry_date': b_exp
+                })
+
+            unmet = max(0.0, units_left_to_fill)
+
+            cursor.execute("""
+            INSERT INTO daily_sales (product_id, sale_date, units_sold, unmet_demand)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(product_id, sale_date) DO UPDATE SET
+                units_sold = units_sold + excluded.units_sold,
+                unmet_demand = unmet_demand + excluded.unmet_demand;
+            """, (p_id, sale_date, actual_units_dispensed, unmet))
+
+            total_dispensed += actual_units_dispensed
+            total_unmet += unmet
+            processed_items.append({
+                'product_id': p_id,
+                'name': p_name,
+                'requested': units_requested,
+                'dispensed': actual_units_dispensed,
+                'unmet_demand': unmet,
+                'batches_depleted': batches_depleted
+            })
+
+        conn.commit()
+        return {
+            'total_medicines': len(processed_items),
+            'total_dispensed': total_dispensed,
+            'total_unmet': total_unmet,
+            'items': processed_items
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+def get_daily_sales_for_date(sale_date: str, db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
+    """Retrieves all medicines dispensed on a specific calendar date with ATC metadata."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT s.sale_id, s.product_id, p.name, p.generic_name, p.category_full_name, s.units_sold, s.unmet_demand
+    FROM daily_sales s
+    JOIN products p ON s.product_id = p.product_id
+    WHERE s.sale_date = ? AND (s.units_sold > 0 OR s.unmet_demand > 0)
+    ORDER BY s.units_sold DESC;
+    """, (sale_date,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

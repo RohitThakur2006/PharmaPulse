@@ -19,10 +19,12 @@ def evaluate_reorder_risk(
     total_stock_on_hand: float,
     predicted_28d_demand: float,
     lead_time_days: int = 7,
-    safety_stock_days: int = 5
+    safety_stock_days: int = 5,
+    mae: float = MODEL_MAE
 ) -> Dict[str, Any]:
     """
     Evaluates stockout / reorder need based on demand forecast and supplier lead time.
+    Calculates empirical prediction uncertainty bands derived directly from model test MAE.
     
     Formula:
     Daily Run-rate = predicted_28d_demand / 28
@@ -35,9 +37,9 @@ def evaluate_reorder_risk(
 
     shortage_28d = max(0.0, predicted_28d_demand - total_stock_on_hand)
 
-    # Uncertainty bounds
-    demand_low = max(0.0, predicted_28d_demand - MODEL_MAE)
-    demand_high = predicted_28d_demand + MODEL_MAE
+    # Honest empirical uncertainty bounds derived directly from verified test MAE
+    demand_low = max(0.0, predicted_28d_demand - mae)
+    demand_high = predicted_28d_demand + mae
 
     if total_stock_on_hand < (lead_time_days * daily_rate):
         flag = "CRITICAL_STOCKOUT"
@@ -70,6 +72,7 @@ def evaluate_reorder_risk(
         'total_stock': total_stock_on_hand,
         'forecast_28d': round(predicted_28d_demand, 1),
         'forecast_range': (round(demand_low, 1), round(demand_high, 1)),
+        'mae': round(mae, 1),
         'days_of_inventory': round(doi, 1),
         'reorder_flag': flag,
         'reorder_badge': badge,

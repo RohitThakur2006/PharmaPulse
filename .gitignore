@@ -12,6 +12,11 @@ __pycache__/
 # Model checkpoints & large temp files
 .ipynb_checkpoints/
 
+# Evaluation output
+mlflow.db
+mlruns/
+reports/
+
 # Virtual environment
 venv/
 .venv/

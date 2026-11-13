@@ -34,6 +34,16 @@ log_sale_atomic = db.log_sale_atomic
 add_batch = db.add_batch
 DB_PATH = db.DB_PATH
 
+log_sales_bulk_atomic = getattr(db, 'log_sales_bulk_atomic', None)
+if log_sales_bulk_atomic is None:
+    importlib.reload(db)
+    log_sales_bulk_atomic = db.log_sales_bulk_atomic
+
+get_daily_sales_for_date = getattr(db, 'get_daily_sales_for_date', None)
+if get_daily_sales_for_date is None:
+    importlib.reload(db)
+    get_daily_sales_for_date = db.get_daily_sales_for_date
+
 if hasattr(db, 'add_product'):
     add_product = db.add_product
 else:
@@ -55,8 +65,20 @@ else:
         return p_id
     db.add_product = add_product
 
-from engine import evaluate_reorder_risk, evaluate_batch_expiry_fefo
+from engine import evaluate_reorder_risk, evaluate_batch_expiry_fefo, MODEL_MAE
 from features import prepare_inference_row, FEATURE_COLUMNS, CATEGORY_MAPPING
+
+# Clean, clinically readable category display labels (prevent badge wrapping & overflow)
+CATEGORY_DISPLAY_LABELS = {
+    'M01AB_Anti_Inflammatory_Acetic': 'Anti-Inflammatory (Acetic)',
+    'M01AE_Anti_Inflammatory_Propionic': 'Anti-Inflammatory (Propionic)',
+    'N02BA_Analgesics_Salicylic': 'Analgesics (Salicylic)',
+    'N02BE_Analgesics_Paracetamol_Anilides': 'Analgesics (Paracetamol)',
+    'N05B_Psycholeptics_Anxiolytics': 'Psycholeptics (Anxiolytics)',
+    'N05C_Psycholeptics_Hypnotics_Sedatives': 'Hypnotics & Sedatives',
+    'R03_Respiratory_Airway_Diseases': 'Respiratory & Airway',
+    'R06_Antihistamines_Systemic': 'Antihistamines (Systemic)',
+}
 
 # -----------------------------------------------------------------------------
 # SAFE HTML RENDERER (ELIMINATES ALL MARKDOWN INDENTED CODE BLOCK GLITCHES)
@@ -415,6 +437,7 @@ button[kind="secondary"]:hover {
     padding: 12px 16px;
     border-bottom: 1px solid rgba(237, 230, 216, 0.15);
     text-align: left;
+    white-space: nowrap;
 }
 .custom-table td {
     background: rgba(17, 38, 26, 0.65);
@@ -438,6 +461,22 @@ button[kind="secondary"]:hover {
 .custom-table tr:hover td {
     background: rgba(23, 52, 36, 0.85);
     border-color: rgba(237, 230, 216, 0.22);
+}
+.custom-table th, .custom-table td {
+    vertical-align: middle;
+}
+.cat-pill {
+    background: rgba(255, 255, 255, 0.07);
+    padding: 4px 11px;
+    border-radius: 9999px;
+    font-size: 0.74rem;
+    font-weight: 500;
+    border: 1px solid rgba(237, 230, 216, 0.16);
+    color: #d1dacd;
+    display: inline-block !important;
+    white-space: nowrap !important;
+    line-height: 1.4;
+    letter-spacing: 0.2px;
 }
 
 /* Glass Form Card for Panel 3 */
@@ -644,8 +683,8 @@ for prod in products_db:
     category_28d_demand = max(0.0, float(cat_forecast_map[p_cat]))
     medicine_demand_28d = max(0.1, category_28d_demand * p_share)
 
-    demand_lower = max(0.0, medicine_demand_28d * 0.90)
-    demand_upper = medicine_demand_28d * 1.10
+    # Statistically honest prediction error scaled from verified CatBoost test MAE (35.13 units)
+    brand_mae = round(MODEL_MAE * p_share, 1)
 
     # Stock batches for this specific medicine
     prod_batches = batches_df[batches_df['product_id'] == p_id].to_dict('records') if not batches_df.empty else []
@@ -666,8 +705,11 @@ for prod in products_db:
         total_stock_on_hand=usable_stock,
         predicted_28d_demand=medicine_demand_28d,
         lead_time_days=7,
-        safety_stock_days=5
+        safety_stock_days=5,
+        mae=brand_mae
     )
+    demand_lower = reorder_eval['forecast_range'][0]
+    demand_upper = reorder_eval['forecast_range'][1]
 
     # 2. Evaluate Batch Expiry Risk (FEFO) on all batches
     expiry_evals = evaluate_batch_expiry_fefo(
@@ -760,6 +802,7 @@ for prod in products_db:
         "atc_code": p_atc,
         "category": p_cat,
         "brand_share": p_share,
+        "brand_mae": brand_mae,
         "total_stock": total_stock,
         "usable_stock": usable_stock,
         "expired_units": expired_units,
@@ -782,7 +825,7 @@ for prod in products_db:
         "actions": actions
     })
 
-    cat_friendly = p_cat.split('_', 1)[1].replace('_', ' ') if '_' in p_cat else p_cat
+    cat_friendly = CATEGORY_DISPLAY_LABELS.get(p_cat, p_cat.split('_', 1)[1].replace('_', ' ') if '_' in p_cat else p_cat)
     doi_val = float(reorder_eval['days_of_inventory'])
     if has_expired:
         severity = 1
@@ -1040,7 +1083,7 @@ if st.session_state.active_nav == "Alerts":
                 <div class="triage-header">
                     <div>
                         <h3 class="triage-title">{item['name']}</h3>
-                        <div class="triage-subtitle">Generic: <strong>{item['generic']}</strong> &nbsp;•&nbsp; ATC: {item['atc_code']} ({item['category'].split('_', 1)[1].replace('_', ' ') if '_' in item['category'] else item['category']})</div>
+                        <div class="triage-subtitle">Generic: <strong>{item['generic']}</strong> &nbsp;•&nbsp; ATC: {item['atc_code']} ({CATEGORY_DISPLAY_LABELS.get(item['category'], item['category'])})</div>
                     </div>
                     <div>{badges_html}</div>
                 </div>
@@ -1053,7 +1096,7 @@ if st.session_state.active_nav == "Alerts":
                     <div class="metric-tile">
                         <div class="metric-label">28-Day Demand Forecast</div>
                         <div class="metric-val">~{item['demand_28d']:,.0f} <span style="font-size: 0.8rem; font-weight: 400; color: #a4b7a7;">units</span></div>
-                        <div style="font-size: 0.72rem; color: #8fa593; margin-top: 2px;">Expected range: {item['demand_lower']:.0f} – {item['demand_upper']:.0f}</div>
+                        <div style="font-size: 0.72rem; color: #a4b7a7; margin-top: 2px;">Test MAE: ±{item['brand_mae']:.1f}u &nbsp;(Range: {item['demand_lower']:.0f}–{item['demand_upper']:.0f})</div>
                     </div>
                     <div class="metric-tile">
                         <div class="metric-label">Stock Runway</div>
@@ -1170,31 +1213,32 @@ elif st.session_state.active_nav == "Inventory":
         if search_q:
             displayed_catalog = [r for r in displayed_catalog if search_q in r['name'].lower() or search_q in r['generic'].lower()]
 
+        # Sort catalog so RED and critical risks are at the TOP, yellow warnings in middle, and green balanced at the bottom!
+        displayed_catalog = sorted(displayed_catalog, key=lambda x: (x['severity_order'], x['runway'], x['name']))
+
         # Render Custom Glass Table
         table_rows_html = ""
         for r in displayed_catalog:
-            if r['has_expired']:
-                status_pill = f"<span class='badge-critical' style='background-color: rgba(220, 38, 38, 0.3); border-color: #ef4444; color: #fca5a5;'>⚫ {r['expired_units']:.0f} Expired</span>"
-            elif r['has_future_waste']:
-                status_pill = f"<span class='badge-critical'>🔴 ~{r['future_waste']:.0f} Units Risk</span>"
-            elif r['runway'] < 7.0:
-                status_pill = "<span class='badge-warning'>🟡 Stockout Warning</span>"
-            else:
-                status_pill = "<span class='badge-optimal'>🟢 Balanced</span>"
-
+            status_pill = r['status_pill']
             runway_color = "#ef4444" if r['runway'] < 7.0 else "#f59e0b" if r['runway'] < 12.0 else "#10b981"
 
             table_rows_html += f"""
             <tr>
-                <td>
-                    <strong style="color: #fbf7ef; font-size: 0.95rem;">{r['name']}</strong>
-                    <div style="font-size: 0.78rem; color: #a4b7a7; margin-top: 2px;">{r['generic']}</div>
+                <td style="vertical-align: middle;">
+                    <div style="font-weight: 700; color: #fdfbf7; font-size: 0.96rem; line-height: 1.35; margin-bottom: 3px;">{r['name']}</div>
+                    <div style="font-size: 0.76rem; color: #a4b7a7; line-height: 1.35; word-break: break-word;">{r['generic']}</div>
                 </td>
-                <td><span style="background: rgba(255, 255, 255, 0.06); padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; border: 1px solid rgba(237, 230, 216, 0.12); color: #c5d4c8;">{r['category']}</span></td>
-                <td><strong>{r['usable_stock']:,.0f}</strong> <span style="font-size: 0.78rem; color: #a4b7a7;">units</span></td>
-                <td>~{r['demand_28d']:.0f} <span style="font-size: 0.78rem; color: #a4b7a7;">units</span></td>
-                <td><span style="color: {runway_color}; font-weight: 700;">{r['runway']:.1f} days</span></td>
-                <td>{status_pill}</td>
+                <td style="vertical-align: middle;"><span class="cat-pill">{r['category']}</span></td>
+                <td style="text-align: right; vertical-align: middle;">
+                    <strong style="color: #fdfbf7; font-size: 1rem;">{r['usable_stock']:,.0f}</strong>
+                    <span style="font-size: 0.76rem; color: #a4b7a7; margin-left: 2px;">units</span>
+                </td>
+                <td style="text-align: right; vertical-align: middle;">
+                    <span style="font-size: 0.98rem; font-weight: 600; color: #e2e8f0;">~{r['demand_28d']:.0f}</span>
+                    <span style="font-size: 0.76rem; color: #a4b7a7; margin-left: 2px;">units</span>
+                </td>
+                <td style="text-align: center; vertical-align: middle;"><span style="color: {runway_color}; font-weight: 700; font-size: 0.95rem;">{r['runway']:.1f} d</span></td>
+                <td style="text-align: center; vertical-align: middle;">{status_pill}</td>
             </tr>
             """
 
@@ -1202,16 +1246,16 @@ elif st.session_state.active_nav == "Inventory":
         <table class="custom-table">
             <thead>
                 <tr>
-                    <th>Medicine & Formulation</th>
-                    <th>Therapeutic Category</th>
-                    <th>Usable Stock</th>
-                    <th>28d Forecast</th>
-                    <th>Stock Runway</th>
-                    <th>Dispensary Status</th>
+                    <th style="width: 32%; min-width: 250px;">Medicine & Formulation</th>
+                    <th style="width: 20%; min-width: 175px;">Therapeutic Category</th>
+                    <th style="width: 12%; min-width: 90px; text-align: right;">Usable Stock</th>
+                    <th style="width: 12%; min-width: 95px; text-align: right;">28d Forecast</th>
+                    <th style="width: 11%; min-width: 90px; text-align: center;">Stock Runway</th>
+                    <th style="width: 13%; min-width: 120px; text-align: center;">Dispensary Status</th>
                 </tr>
             </thead>
             <tbody>
-                {table_rows_html if table_rows_html else "<tr><td colspan='6' style='text-align: center; color: #a4b7a7;'>No medicines match your search criteria.</td></tr>"}
+                {table_rows_html if table_rows_html else "<tr><td colspan='6' style='text-align: center; color: #a4b7a7; padding: 24px;'>No medicines match your search criteria.</td></tr>"}
             </tbody>
         </table>
         """
@@ -1263,13 +1307,19 @@ elif st.session_state.active_nav == "Inventory":
 
             batch_rows_html += f"""
             <tr>
-                <td><code style="background: rgba(0, 0, 0, 0.3); padding: 3px 8px; border-radius: 6px; color: #ede4d3; font-family: 'JetBrains Mono', monospace;">{b['batch_id']}</code></td>
-                <td><strong>{b['product_name']}</strong><div style="font-size: 0.76rem; color: #a4b7a7;">{b['generic_name']}</div></td>
-                <td><strong>{b['quantity_on_hand']:,.0f}</strong> / {b['initial_quantity']:,.0f} units</td>
-                <td>{b['received_date']}</td>
-                <td>{b['expiry_date']}</td>
-                <td>{days_str}</td>
-                <td>{exp_badge}</td>
+                <td style="vertical-align: middle;"><code style="background: rgba(0, 0, 0, 0.35); padding: 4px 8px; border-radius: 6px; color: #ede4d3; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; border: 1px solid rgba(237, 230, 216, 0.1);">{b['batch_id']}</code></td>
+                <td style="vertical-align: middle;">
+                    <div style="font-weight: 700; color: #fdfbf7; font-size: 0.95rem; line-height: 1.35; margin-bottom: 2px;">{b['product_name']}</div>
+                    <div style="font-size: 0.76rem; color: #a4b7a7; line-height: 1.3;">{b['generic_name']}</div>
+                </td>
+                <td style="text-align: right; vertical-align: middle;">
+                    <strong style="color: #fdfbf7; font-size: 0.95rem;">{b['quantity_on_hand']:,.0f}</strong>
+                    <span style="font-size: 0.78rem; color: #a4b7a7;"> / {b['initial_quantity']:,.0f} u</span>
+                </td>
+                <td style="text-align: center; vertical-align: middle; font-size: 0.82rem; color: #c5d4c8;">{b['received_date']}</td>
+                <td style="text-align: center; vertical-align: middle; font-size: 0.82rem; color: #c5d4c8;">{b['expiry_date']}</td>
+                <td style="text-align: center; vertical-align: middle;">{days_str}</td>
+                <td style="text-align: center; vertical-align: middle;">{exp_badge}</td>
             </tr>
             """
 
@@ -1277,17 +1327,17 @@ elif st.session_state.active_nav == "Inventory":
         <table class="custom-table">
             <thead>
                 <tr>
-                    <th>Batch LOT</th>
-                    <th>Medicine Formulation</th>
-                    <th>Units Remaining</th>
-                    <th>Received Date</th>
-                    <th>Expiry Date</th>
-                    <th>Shelf Life Left</th>
-                    <th>FEFO Status</th>
+                    <th style="width: 14%; min-width: 115px;">Batch LOT</th>
+                    <th style="width: 30%; min-width: 240px;">Medicine Formulation</th>
+                    <th style="width: 14%; min-width: 110px; text-align: right;">Units Remaining</th>
+                    <th style="width: 10%; min-width: 95px; text-align: center;">Received</th>
+                    <th style="width: 10%; min-width: 95px; text-align: center;">Expiry Date</th>
+                    <th style="width: 10%; min-width: 95px; text-align: center;">Shelf Life</th>
+                    <th style="width: 12%; min-width: 110px; text-align: center;">FEFO Status</th>
                 </tr>
             </thead>
             <tbody>
-                {batch_rows_html if batch_rows_html else "<tr><td colspan='7' style='text-align: center; color: #a4b7a7;'>No batches match your filter criteria.</td></tr>"}
+                {batch_rows_html if batch_rows_html else "<tr><td colspan='7' style='text-align: center; color: #a4b7a7; padding: 24px;'>No batches match your filter criteria.</td></tr>"}
             </tbody>
         </table>
         """
@@ -1328,91 +1378,294 @@ elif st.session_state.active_nav == "POS":
 
     render_html("<div style='margin-bottom: 1.5rem;'></div>")
 
-    # DRAWER 1: DAILY DISPENSE COUNTER
-    with st.expander("📝 Operation 1: Daily Dispense Counter (Patient Sale)", expanded=(st.session_state.pos_active_drawer == "dispense")):
+    # -------------------------------------------------------------------------
+    # VENUE 1: DAILY DISPENSE COUNTER (BULK DAY SHEET)
+    # -------------------------------------------------------------------------
+    if st.session_state.pos_active_drawer == "dispense":
         render_html("""
-        <div style="margin-bottom: 14px;">
-            <div style="font-size: 0.88rem; color: #b5c7b8;">
-                Record patient dispensing. Physical stock is atomically deducted from the oldest valid batch in <strong>First-Expiring, First-Out (FEFO)</strong> sequence.
+        <div class="pos-glass-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">📝 Operation 1: Daily Dispense Counter (Bulk Day Sheet)</h3>
+                <span class="electric-pill">Comprehensive Formulary</span>
+            </div>
+            <div style="font-size: 0.85rem; color: #b5c7b8; line-height: 1.5;">
+                Record your dispensary's complete day-end patient sales in one unified transaction. Review all 38 essential Indian household medicines grouped by therapeutic class, input the units sold today, and commit everything together. Physical stock is deducted atomically in First-Expiring, First-Out (FEFO) sequence across active batches.
             </div>
         </div>
         """)
-        with st.form("pos_sale_form"):
-            sale_date_val = st.date_input("Sale Date", value=as_of_date, key="sale_dt_pos")
-            
-            # Select exact medicine
-            prod_map = {f"{p['name']} ({p['generic_name']})": p for p in products_db}
-            sel_label = st.selectbox("Select Exact Medicine Dispensed", options=list(prod_map.keys()), key="sale_med_pos")
-            selected_prod = prod_map[sel_label]
-            
-            # Check available unexpired batches for this product
-            active_p_batches = batches_df[
-                (batches_df['product_id'] == selected_prod['product_id']) & 
-                (batches_df['expiry_date'] > str(as_of_date))
-            ].sort_values('expiry_date')
-            total_avail = active_p_batches['quantity_on_hand'].sum() if not active_p_batches.empty else 0
 
-            # Unit input
-            dispensed_units = st.number_input(
-                f"Units to Dispense (Usable Stock on shelf: {total_avail:,.0f} units)", 
-                min_value=1.0, 
-                value=min(15.0, max(1.0, float(total_avail))), 
-                step=1.0,
-                key="sale_units_pos"
+        # 1. Date Selector & Day-End Status Overview
+        d_c1, d_c2 = st.columns([1, 2])
+        with d_c1:
+            sale_date_val = st.date_input(
+                "📅 Dispensing Calendar Date",
+                value=as_of_date,
+                key="bulk_pos_sale_date"
             )
 
-            # Peek oldest batch
-            if not active_p_batches.empty:
-                oldest_b = active_p_batches.iloc[0]
-                days_left = (pd.to_datetime(oldest_b['expiry_date']) - pd.to_datetime(as_of_date)).days
+        # Retrieve any sales already logged for this exact date
+        day_sales_logged = get_daily_sales_for_date(str(sale_date_val))
+        total_already_dispensed = sum(s['units_sold'] for s in day_sales_logged)
+
+        with d_c2:
+            if day_sales_logged:
                 render_html(f"""
-                <div style="background: rgba(0,0,0,0.25); padding: 12px 16px; border-radius: 12px; margin: 14px 0; border: 1px solid rgba(237, 230, 216, 0.12);">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="font-size: 0.74rem; color: #a4b7a7; text-transform: uppercase; font-weight: 700; letter-spacing: 0.6px;">FEFO Queue Front Batch</span>
-                        <span class="electric-pill">Next in Line</span>
+                <div style="background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.38); border-radius: 12px; padding: 10px 16px; margin-top: 4px;">
+                    <div style="font-size: 0.74rem; color: #d8b4fe; font-weight: 700; text-transform: uppercase;">Logged History for {sale_date_val}</div>
+                    <div style="font-size: 0.95rem; color: #ffffff; font-weight: 600; margin-top: 2px;">
+                        <strong>{total_already_dispensed:,.0f} units</strong> already recorded across <strong>{len(day_sales_logged)} medicine(s)</strong>.
                     </div>
-                    <div style="font-size: 0.9rem; color: #f7f2e8; margin-top: 6px;">
-                        Batch LOT: <code>{oldest_b['batch_id']}</code> &nbsp;•&nbsp; Stock: <strong>{oldest_b['quantity_on_hand']:.0f} units</strong> &nbsp;•&nbsp; Expires: {oldest_b['expiry_date']} ({days_left}d left)
-                    </div>
+                    <div style="font-size: 0.74rem; color: #c5d4c8; margin-top: 2px;">Submitting below will additively update this day's sales and deplete active FEFO batches.</div>
                 </div>
                 """)
             else:
-                render_html("""
-                <div style="background: rgba(220, 38, 38, 0.15); padding: 12px 16px; border-radius: 12px; margin: 14px 0; border: 1px solid rgba(239, 68, 68, 0.35);">
-                    <span style="color: #fca5a5; font-size: 0.88rem; font-weight: 600;">⚠️ ZERO usable batches in stock! Dispensing this medicine will record unmet demand (stockout).</span>
+                render_html(f"""
+                <div style="background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(237, 230, 216, 0.12); border-radius: 12px; padding: 10px 16px; margin-top: 4px;">
+                    <div style="font-size: 0.74rem; color: #a4b7a7; font-weight: 700; text-transform: uppercase;">Status for {sale_date_val}</div>
+                    <div style="font-size: 0.95rem; color: #ffffff; font-weight: 600; margin-top: 2px;">
+                        No patient dispensing recorded yet for this date.
+                    </div>
+                    <div style="font-size: 0.74rem; color: #8fa593; margin-top: 2px;">Fill in the units sold below and submit the complete sheet together.</div>
                 </div>
                 """)
 
-            submit_dispense = st.form_submit_button("⚡ Dispense & Deduct from FEFO Stock", use_container_width=True)
-            if submit_dispense:
-                try:
-                    res = log_sale_atomic(
-                        product_id=selected_prod['product_id'],
-                        sale_date=str(sale_date_val),
-                        units_requested=dispensed_units
+        # 2. Transaction Receipt Audit Card (if just committed)
+        if "last_bulk_receipt" in st.session_state and st.session_state["last_bulk_receipt"]:
+            receipt = st.session_state["last_bulk_receipt"]
+            items_list_html = ""
+            for it in receipt['items']:
+                batch_parts = []
+                for b in it['batches_depleted']:
+                    rem_color = "#ef4444" if b['remaining'] == 0 else "#a7f3d0"
+                    batch_parts.append(
+                        f"<code>{b['batch_id']}</code> (-{b['deducted']:.0f}u, <span style='color: {rem_color};'>{b['remaining']:.0f}u left</span>)"
                     )
-                    if res['unmet_demand'] > 0:
-                        st.warning(f"⚠️ Dispensed {res['dispensed']:.0f} units of {selected_prod['name']}. Unmet demand of {res['unmet_demand']:.0f} units recorded due to stockout!")
-                    else:
-                        st.success(f"✅ Successfully dispensed {res['dispensed']:.0f} units of {selected_prod['name']} via FEFO depletion!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error logging sale: {e}")
+                batch_str = ", ".join(batch_parts) if batch_parts else "No batches depleted"
+                unmet_alert = f" <span style='color: #ef4444; font-weight: 700;'>(⚠️ {it['unmet_demand']:.0f} units unmet stockout)</span>" if it['unmet_demand'] > 0 else ""
+                items_list_html += f"""
+                <li style="margin-bottom: 7px; font-size: 0.88rem; color: #fdfbf7;">
+                    <strong>{it['name']}</strong>: <span style="color: #a7f3d0; font-weight: 700;">{it['dispensed']:,.0f} units</span> dispensed {unmet_alert}
+                    <div style="font-size: 0.76rem; color: #d8b4fe; margin-top: 2px;">FEFO Allocations: {batch_str}</div>
+                </li>
+                """
 
-    # DRAWER 2: RECEIVE NEW BATCH FOR EXISTING MEDICINE
-    with st.expander("📦 Operation 2: Receive New Batch (Existing Medicine Stock Replenishment)", expanded=(st.session_state.pos_active_drawer == "batch")):
+            render_html(f"""
+            <div style="background: rgba(88, 28, 135, 0.28); border: 1.5px solid #a855f7; border-radius: 14px; padding: 18px 20px; margin: 16px 0 24px 0; box-shadow: 0 8px 25px rgba(168, 85, 247, 0.2);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.1rem; color: #c4b5fd;">✦</span>
+                        <strong style="color: #f3e8ff; text-transform: uppercase; letter-spacing: 0.8px; font-size: 0.78rem;">Dispensing Transaction Committed (Atomic FEFO)</strong>
+                    </div>
+                    <span class="electric-pill">{receipt.get('date', str(sale_date_val))}</span>
+                </div>
+                <div style="font-size: 1.15rem; color: #ffffff; font-weight: 700;">
+                    ✅ Successfully recorded {receipt['total_dispensed']:,.0f} units across {receipt['total_medicines']} medicine(s)
+                </div>
+                <div style="margin-top: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 10px; padding: 12px 16px;">
+                    <div style="font-size: 0.74rem; color: #d8b4fe; text-transform: uppercase; font-weight: 700; margin-bottom: 6px;">Itemized Batch Depletion Audit</div>
+                    <ul style="margin: 0; padding-left: 18px;">
+                        {items_list_html}
+                    </ul>
+                </div>
+            </div>
+            """)
+            if st.button("✕ Dismiss Receipt", key="btn_dismiss_bulk_receipt"):
+                st.session_state["last_bulk_receipt"] = None
+                st.rerun()
+
+        # 3. The Unified Daily Dispensing Sheet Form
+        with st.form("bulk_daily_dispense_form"):
+            render_html("""
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: rgba(17, 38, 26, 0.95); border-radius: 8px; border-bottom: 2px solid rgba(237, 230, 216, 0.15); margin-bottom: 12px;">
+                <span style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: #c5d4c8; letter-spacing: 0.5px;">Medicine Formulation</span>
+                <span style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: #c5d4c8; letter-spacing: 0.5px; margin-right: 180px;">Shelf Stock & FEFO Batch</span>
+                <span style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: #c5d4c8; letter-spacing: 0.5px;">Units Dispensed</span>
+            </div>
+            """)
+
+            # Group medicines by category in stable order
+            categories_seen = []
+            for p in products_db:
+                cat = p['category_full_name']
+                if cat not in categories_seen:
+                    categories_seen.append(cat)
+
+            qty_inputs = {}
+
+            for cat_code in categories_seen:
+                cat_prods = [p for p in products_db if p['category_full_name'] == cat_code]
+                cat_name = CATEGORY_DISPLAY_LABELS.get(cat_code, cat_code.split('_', 1)[1].replace('_', ' ') if '_' in cat_code else cat_code)
+
+                render_html(f"""
+                <div style="background: rgba(17, 38, 26, 0.85); border-left: 4px solid #a855f7; padding: 8px 14px; border-radius: 8px; margin: 18px 0 10px 0; display: flex; justify-content: space-between; align-items: center;">
+                    <strong style="color: #fdfbf7; font-size: 0.94rem;">{cat_name}</strong>
+                    <span class="cat-pill">{len(cat_prods)} formulations</span>
+                </div>
+                """)
+
+                for p in cat_prods:
+                    p_id = p['product_id']
+                    # Look up live batches for this medicine relative to sale_date_val
+                    p_batches = batches_df[batches_df['product_id'] == p_id].to_dict('records') if not batches_df.empty else []
+                    valid_b = [
+                        b for b in p_batches 
+                        if pd.to_datetime(b['expiry_date']) > pd.to_datetime(sale_date_val)
+                        and pd.to_datetime(b['received_date']) <= pd.to_datetime(sale_date_val)
+                        and b['quantity_on_hand'] > 0
+                    ]
+                    valid_b = sorted(valid_b, key=lambda b: pd.to_datetime(b['expiry_date']))
+                    usable_stock = sum(b['quantity_on_hand'] for b in valid_b)
+
+                    if valid_b:
+                        front_b = valid_b[0]
+                        days_left = (pd.to_datetime(front_b['expiry_date']) - pd.to_datetime(sale_date_val)).days
+                        lot_color = "#fca5a5" if days_left <= 30 else "#d8b4fe"
+                        stock_info_html = f"""
+                        <div style="color: #a7f3d0; font-weight: 600; font-size: 0.88rem;">{usable_stock:,.0f} units usable</div>
+                        <div style="font-size: 0.74rem; color: #a4b7a7; margin-top: 2px;">Front: <code style="color: {lot_color};">{front_b['batch_id']}</code> ({days_left}d left)</div>
+                        """
+                    else:
+                        stock_info_html = """
+                        <div style="color: #ef4444; font-weight: 700; font-size: 0.88rem;">0 units usable</div>
+                        <div style="font-size: 0.74rem; color: #fca5a5; margin-top: 2px;">⚠️ Stockout risk</div>
+                        """
+
+                    row_c1, row_c2, row_c3 = st.columns([3, 2, 1.2])
+
+                    with row_c1:
+                        render_html(f"""
+                        <div style="padding: 4px 0;">
+                            <div style="font-weight: 700; color: #fdfbf7; font-size: 0.94rem; line-height: 1.3;">{p['name']}</div>
+                            <div style="font-size: 0.76rem; color: #a4b7a7; line-height: 1.3;">{p['generic_name']}</div>
+                        </div>
+                        """)
+
+                    with row_c2:
+                        render_html(f"""
+                        <div style="padding: 4px 0;">
+                            {stock_info_html}
+                        </div>
+                        """)
+
+                    with row_c3:
+                        qty_inputs[p_id] = st.number_input(
+                            f"Units Sold - {p['name']}",
+                            min_value=0.0,
+                            value=0.0,
+                            step=1.0,
+                            key=f"bulk_sale_qty_{p_id}",
+                            label_visibility="collapsed"
+                        )
+
+            render_html("<div style='margin-top: 20px;'></div>")
+            submit_all = st.form_submit_button(
+                "⚡ Commit & Record All Dispensed Medicines for This Day",
+                use_container_width=True,
+                type="primary"
+            )
+
+            if submit_all:
+                sales_to_record = []
+                for p in products_db:
+                    p_id = p['product_id']
+                    val = float(qty_inputs.get(p_id, 0.0))
+                    if val > 0.0:
+                        sales_to_record.append({
+                            'product_id': p_id,
+                            'product_name': p['name'],
+                            'units': val
+                        })
+
+                if not sales_to_record:
+                    st.warning("⚠️ No dispensing quantities were entered (all medicines have 0 units). Please enter the units sold for at least one medicine before submitting.")
+                else:
+                    try:
+                        receipt = log_sales_bulk_atomic(sales_to_record, sale_date=str(sale_date_val))
+                        receipt['date'] = str(sale_date_val)
+                        st.session_state["last_bulk_receipt"] = receipt
+                        st.success(f"✅ Successfully recorded {receipt['total_dispensed']:,.0f} units across {receipt['total_medicines']} medicine(s) for {sale_date_val}!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error logging day's sales: {e}")
+
+        # 4. Cumulative dispensing ledger for this day
+        if day_sales_logged:
+            render_html("<div style='margin-top: 28px;'></div>")
+            with st.expander(f"📋 View All Dispensing Already Recorded for {sale_date_val} ({len(day_sales_logged)} medicines, {total_already_dispensed:,.0f} units)", expanded=False):
+                logged_table_rows = ""
+                for s in day_sales_logged:
+                    c_clean = CATEGORY_DISPLAY_LABELS.get(s['category_full_name'], s['category_full_name'].split('_', 1)[1].replace('_', ' ') if '_' in s['category_full_name'] else s['category_full_name'])
+                    unmet_badge = f"<span class='badge-critical' style='padding: 2px 8px; font-size: 0.72rem;'>⚠️ {s['unmet_demand']:.0f} unmet</span>" if s['unmet_demand'] > 0 else "<span style='color: #a7f3d0;'>Filled</span>"
+                    logged_table_rows += f"""
+                    <tr>
+                        <td style="vertical-align: middle;">
+                            <strong style="color: #fdfbf7;">{s['name']}</strong>
+                            <div style="font-size: 0.76rem; color: #a4b7a7;">{s['generic_name']}</div>
+                        </td>
+                        <td style="vertical-align: middle;"><span class="cat-pill">{c_clean}</span></td>
+                        <td style="text-align: right; vertical-align: middle;"><strong style="color: #a7f3d0; font-size: 1rem;">{s['units_sold']:,.0f}</strong> <span style="font-size: 0.76rem; color: #a4b7a7;">units</span></td>
+                        <td style="text-align: center; vertical-align: middle;">{unmet_badge}</td>
+                    </tr>
+                    """
+
+                render_html(f"""
+                <table class="custom-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40%;">Medicine Formulation</th>
+                            <th style="width: 25%;">Category</th>
+                            <th style="width: 18%; text-align: right;">Total Dispensed</th>
+                            <th style="width: 17%; text-align: center;">Fulfillment</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {logged_table_rows}
+                    </tbody>
+                </table>
+                """)
+
+    # -------------------------------------------------------------------------
+    # VENUE 2: RECEIVE NEW BATCH FOR EXISTING MEDICINE
+    # -------------------------------------------------------------------------
+    elif st.session_state.pos_active_drawer == "batch":
         render_html("""
-        <div style="margin-bottom: 14px;">
-            <div style="font-size: 0.88rem; color: #b5c7b8;">
-                Receive incoming stock shipment for a medicine already registered in the formulary. The new batch is immediately queued into physical inventory.
+        <div class="pos-glass-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">📦 Operation 2: Receive New Batch (Existing Medicine)</h3>
+                <span style="background: rgba(16, 185, 129, 0.2); color: #a7f3d0; border: 1px solid rgba(52, 211, 153, 0.4); border-radius: 9999px; padding: 4px 12px; font-size: 0.72rem; font-weight: 700;">Restock Delivery</span>
+            </div>
+            <div style="font-size: 0.85rem; color: #b5c7b8;">
+                Receive an incoming stock shipment from a pharmaceutical distributor for an existing formulary medicine.
             </div>
         </div>
         """)
-        with st.form("receive_batch_existing_form"):
-            prod_batch_map = {f"{p['name']} ({p['generic_name']})": p for p in products_db}
-            sel_b_label = st.selectbox("Select Existing Medicine in Dispensary", options=list(prod_batch_map.keys()), key="rec_med_sel")
-            selected_b_prod = prod_batch_map[sel_b_label]
 
+        prod_batch_map = {f"{p['name']} ({p['generic_name']})": p for p in products_db}
+        sel_b_label = st.selectbox("Select Existing Medicine to Restock", options=list(prod_batch_map.keys()), key="rec_med_sel")
+        selected_b_prod = prod_batch_map[sel_b_label]
+
+        # Live stock peek for this medicine from SQLite
+        conn_live = get_connection()
+        curr_lots = conn_live.execute("""
+            SELECT batch_id, quantity_on_hand, expiry_date 
+            FROM inventory_batches 
+            WHERE product_id = ? AND quantity_on_hand > 0 
+            ORDER BY expiry_date ASC;
+        """, (selected_b_prod['product_id'],)).fetchall()
+        conn_live.close()
+
+        total_curr_stock = sum(l['quantity_on_hand'] for l in curr_lots)
+        lots_str = ", ".join(f"<code>{l['batch_id']}</code> ({l['quantity_on_hand']:.0f}u, exp {l['expiry_date']})" for l in curr_lots) if curr_lots else "No active batches currently"
+        render_html(f"""
+        <div style="background: rgba(0,0,0,0.22); padding: 12px 16px; border-radius: 10px; margin: 10px 0 16px 0; border: 1px solid rgba(237, 230, 216, 0.1);">
+            <div style="font-size: 0.75rem; color: #a4b7a7; text-transform: uppercase; font-weight: 600;">Current Stock on Shelf</div>
+            <div style="font-size: 0.92rem; color: #f7f2e8; margin-top: 3px;">
+                Total: <strong>{total_curr_stock:,.0f} units</strong> across {len(curr_lots)} batch(es): {lots_str}
+            </div>
+        </div>
+        """)
+
+        with st.form("receive_batch_existing_form"):
             rc1, rc2, rc3 = st.columns(3)
             rec_lot = rc1.text_input("Incoming Batch LOT ID", placeholder="e.g., LOT-DOLO-2020-B2", key="rec_lot_input")
             rec_qty = rc2.number_input("Units Received", min_value=1.0, value=100.0, step=10.0, key="rec_qty_input")
@@ -1425,7 +1678,7 @@ elif st.session_state.active_nav == "POS":
                 if not rec_lot.strip():
                     st.error("Please enter a valid Batch LOT ID.")
                 elif rec_exp <= rec_dt:
-                    st.error("Expiry date must be in the future relative to the delivery date!")
+                    st.error("Expiry date must be in the future relative to delivery date!")
                 else:
                     try:
                         add_batch(
@@ -1440,20 +1693,26 @@ elif st.session_state.active_nav == "POS":
                     except Exception as e:
                         st.error(f"Error receiving batch: {e}")
 
-    # DRAWER 3: REGISTER BRAND NEW MEDICINE & CATEGORY
-    with st.expander("➕ Operation 3: Register Brand New Medicine (Formulary Expansion)", expanded=(st.session_state.pos_active_drawer == "medicine")):
+    # -------------------------------------------------------------------------
+    # VENUE 3: REGISTER BRAND NEW MEDICINE & CATEGORY
+    # -------------------------------------------------------------------------
+    elif st.session_state.pos_active_drawer == "medicine":
         render_html("""
-        <div style="margin-bottom: 14px;">
-            <div style="font-size: 0.88rem; color: #b5c7b8;">
-                Adding a new medicine brand not yet in the dispensary catalog? Enter its name, generic active salt, choose its therapeutic category, and register its initial batch.
+        <div class="pos-glass-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">➕ Operation 3: Register Brand New Medicine</h3>
+                <span class="electric-pill">Formulary Expansion</span>
+            </div>
+            <div style="font-size: 0.85rem; color: #b5c7b8;">
+                Registering a medicine brand not yet in the dispensary catalog? Enter its formulation details, choose its clinical category, and receive its initial delivery batch.
             </div>
         </div>
         """)
+
         with st.form("register_new_medicine_form"):
             new_name = st.text_input("Medicine Brand Name", placeholder="e.g., Augmentin 625 Duo Tablet", key="new_med_name")
             new_generic = st.text_input("Generic Active Salt & Strength", placeholder="e.g., Amoxycillin 500mg + Clavulanic Acid 125mg", key="new_med_salt")
 
-            # Explicit category choices for the user
             category_options = {
                 "Analgesics (Paracetamol & Anilides) [Fever & Mild Pain]": ("N02BE", "N02BE_Analgesics_Paracetamol_Anilides"),
                 "Anti-Inflammatory (Propionic) [Ibuprofen / Body Ache]": ("M01AE", "M01AE_Anti_Inflammatory_Propionic"),
