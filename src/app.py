@@ -44,6 +44,11 @@ if get_daily_sales_for_date is None:
     importlib.reload(db)
     get_daily_sales_for_date = db.get_daily_sales_for_date
 
+discard_batch_stock = getattr(db, 'discard_batch_stock', None)
+if discard_batch_stock is None:
+    importlib.reload(db)
+    discard_batch_stock = db.discard_batch_stock
+
 if hasattr(db, 'add_product'):
     add_product = db.add_product
 else:
@@ -1007,6 +1012,26 @@ if st.session_state.active_nav == "Alerts":
         </div>
         """)
 
+        # Instant Quick-Action Discard for Spotlight Expired Batch
+        if urgent_item['has_expired'] and urgent_item['expired_batches']:
+            exp_lot_obj = urgent_item['expired_batches'][0]
+            with st.expander(f"🗑️ Instant Action: Quarantine & Discard Batch {exp_lot_obj['batch_id']} ({exp_lot_obj['quantity_on_hand']:.0f} units)", expanded=False):
+                st.caption(f"Immediately remove batch **{exp_lot_obj['batch_id']}** ({exp_lot_obj['quantity_on_hand']:.0f} units of {urgent_item['name']}) from active shelf inventory. Deducts stock atomically in SQLite and records an audit log under `EXPIRED_WASTE`.")
+                col_disc_btn, _ = st.columns([2, 3])
+                with col_disc_btn:
+                    if st.button(f"🗑️ Confirm Discard of {exp_lot_obj['quantity_on_hand']:.0f} Units", key=f"quick_discard_spotlight_{exp_lot_obj['batch_id']}", type="primary", use_container_width=True):
+                        try:
+                            discard_batch_stock(
+                                batch_id=exp_lot_obj['batch_id'],
+                                units_to_discard=exp_lot_obj['quantity_on_hand'],
+                                disposal_date=str(as_of_date),
+                                reason="Manufacturer Expiry Reached (Spotlight Immediate Quarantine)"
+                            )
+                            st.success(f"✅ Successfully quarantined and wrote off {exp_lot_obj['quantity_on_hand']:.0f} units of {exp_lot_obj['batch_id']}!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error discarding batch: {e}")
+
     # 3. TRIAGE FILTER STRIP
     if "triage_filter" not in st.session_state:
         st.session_state.triage_filter = "Action Required"
@@ -1354,7 +1379,7 @@ elif st.session_state.active_nav == "POS":
         st.session_state.pos_active_drawer = "dispense"
 
     # Top Selector Quick-Pill Navigation
-    q_col1, q_col2, q_col3 = st.columns(3)
+    q_col1, q_col2, q_col3, q_col4 = st.columns(4)
     with q_col1:
         is_d = (st.session_state.pos_active_drawer == "dispense")
         if st.button("📝 1. Daily Dispense Counter\nPatient POS & Atomic FEFO Depletion", key="btn_pos_disp",
@@ -1364,14 +1389,23 @@ elif st.session_state.active_nav == "POS":
 
     with q_col2:
         is_b = (st.session_state.pos_active_drawer == "batch")
-        if st.button("📦 2. Receive Batch (Existing Medicine)\nStock Replenishment Delivery", key="btn_pos_batch",
+        if st.button("📦 2. Receive Batch (Delivery)\nStock Replenishment Delivery", key="btn_pos_batch",
                      use_container_width=True, type="primary" if is_b else "secondary"):
             st.session_state.pos_active_drawer = "batch"
             st.rerun()
 
     with q_col3:
+        is_disc = (st.session_state.pos_active_drawer == "discard")
+        exp_count = sum(1 for _, b in batches_df.iterrows() if pd.to_datetime(b['expiry_date']) <= pd.to_datetime(as_of_date) and b['quantity_on_hand'] > 0)
+        sub_d = f"🚨 {exp_count} Lot(s) Expired On Shelf" if exp_count > 0 else "Quarantine & Physical Write-Off"
+        if st.button(f"🗑️ 3. Discard Expired Stock\n{sub_d}", key="btn_pos_discard",
+                     use_container_width=True, type="primary" if is_disc else "secondary"):
+            st.session_state.pos_active_drawer = "discard"
+            st.rerun()
+
+    with q_col4:
         is_m = (st.session_state.pos_active_drawer == "medicine")
-        if st.button("➕ 3. Register Brand New Medicine\nAdd New Formulation & Category", key="btn_pos_med",
+        if st.button("➕ 4. Register New Medicine\nAdd Formulary Brand & Category", key="btn_pos_med",
                      use_container_width=True, type="primary" if is_m else "secondary"):
             st.session_state.pos_active_drawer = "medicine"
             st.rerun()
@@ -1694,13 +1728,188 @@ elif st.session_state.active_nav == "POS":
                         st.error(f"Error receiving batch: {e}")
 
     # -------------------------------------------------------------------------
-    # VENUE 3: REGISTER BRAND NEW MEDICINE & CATEGORY
+    # VENUE 3: DISCARD & QUARANTINE EXPIRED STOCK (INVENTORY WRITE-OFF)
+    # -------------------------------------------------------------------------
+    elif st.session_state.pos_active_drawer == "discard":
+        render_html("""
+        <div class="pos-glass-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">🗑️ Operation 3: Discard & Quarantine Expired Stock</h3>
+                <span class="electric-pill" style="border-color: #ef4444; color: #fca5a5;">Physical Inventory Write-Off</span>
+            </div>
+            <div style="font-size: 0.85rem; color: #b5c7b8; line-height: 1.5;">
+                Formally record the physical removal, quarantine, destruction, or vendor credit return (RMA) of expired or damaged medicine batches. Stock is deducted immediately from physical inventory, clearing clinical alerts, and an immutable audit trail is logged into the movements ledger.
+            </div>
+        </div>
+        """)
+
+        # Fetch all active batches with stock > 0
+        conn_disc = get_connection()
+        active_lots = conn_disc.execute("""
+            SELECT b.batch_id, b.product_id, b.quantity_on_hand, b.initial_quantity, b.received_date, b.expiry_date,
+                   p.name AS product_name, p.generic_name, p.category_full_name
+            FROM inventory_batches b
+            JOIN products p ON b.product_id = p.product_id
+            WHERE b.quantity_on_hand > 0
+            ORDER BY b.expiry_date ASC;
+        """).fetchall()
+
+        # Fetch recent EXPIRED_WASTE audit movements
+        recent_waste_movements = conn_disc.execute("""
+            SELECT m.movement_id, m.batch_id, m.movement_date, m.quantity_change, m.notes,
+                   p.name AS product_name
+            FROM stock_movements m
+            JOIN inventory_batches b ON m.batch_id = b.batch_id
+            JOIN products p ON b.product_id = p.product_id
+            WHERE m.movement_type = 'EXPIRED_WASTE'
+            ORDER BY m.movement_id DESC
+            LIMIT 10;
+        """).fetchall()
+        conn_disc.close()
+
+        # Identify currently expired lots relative to as_of_date
+        expired_on_shelf = [
+            l for l in active_lots 
+            if pd.to_datetime(l['expiry_date']) <= pd.to_datetime(as_of_date)
+        ]
+        total_expired_u = sum(l['quantity_on_hand'] for l in expired_on_shelf)
+
+        if expired_on_shelf:
+            exp_names = ", ".join(f"<code>{l['batch_id']}</code> ({l['product_name']}, {l['quantity_on_hand']:.0f}u)" for l in expired_on_shelf)
+            render_html(f"""
+            <div style="background: rgba(220, 38, 38, 0.22); border: 1px solid #ef4444; border-radius: 12px; padding: 12px 18px; margin: 12px 0 18px 0;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 1.1rem; color: #ef4444;">🚨</span>
+                    <strong style="color: #fca5a5; font-size: 0.95rem;">Action Required: {len(expired_on_shelf)} Batch(es) ({total_expired_u:,.0f} Units) Expired on Shelf</strong>
+                </div>
+                <div style="font-size: 0.83rem; color: #fee2e2; margin-top: 5px; line-height: 1.4;">
+                    Expired lots currently on physical shelf: {exp_names}. These must be immediately removed and quarantined to protect patient safety.
+                </div>
+            </div>
+            """)
+        else:
+            render_html("""
+            <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(52, 211, 153, 0.35); border-radius: 12px; padding: 12px 18px; margin: 12px 0 18px 0;">
+                <strong style="color: #a7f3d0; font-size: 0.92rem;">🟢 No Batches Currently Past Expiration</strong>
+                <div style="font-size: 0.82rem; color: #d1fae5; margin-top: 3px;">
+                    All monitored inventory batches are within valid shelf life as of today. You can still record disposal for damaged goods, broken seals, or vendor quality recalls.
+                </div>
+            </div>
+            """)
+
+        if not active_lots:
+            st.info("ℹ️ No physical inventory batches currently exist in the database.")
+        else:
+            # Build options with expired lots sorted to top with red warning indicator
+            lot_options = {}
+            for l in active_lots:
+                is_exp = pd.to_datetime(l['expiry_date']) <= pd.to_datetime(as_of_date)
+                prefix = "🔴 EXPIRED" if is_exp else "🟢 Valid"
+                label = f"{prefix} | {l['batch_id']} — {l['product_name']} ({l['quantity_on_hand']:.0f} units in stock • Exp: {l['expiry_date']})"
+                lot_options[label] = l
+
+            with st.form("discard_quarantine_stock_form"):
+                sel_lot_label = st.selectbox(
+                    "Select Batch LOT to Discard & Quarantine",
+                    options=list(lot_options.keys()),
+                    key="discard_lot_select"
+                )
+                sel_lot_data = lot_options[sel_lot_label]
+                is_this_lot_exp = pd.to_datetime(sel_lot_data['expiry_date']) <= pd.to_datetime(as_of_date)
+                days_diff = (pd.to_datetime(as_of_date) - pd.to_datetime(sel_lot_data['expiry_date'])).days
+
+                if is_this_lot_exp:
+                    render_html(f"""
+                    <div style="background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; padding: 8px 14px; border-radius: 6px; margin: 6px 0 14px 0; font-size: 0.82rem; color: #fca5a5;">
+                        ⚠️ <strong>{sel_lot_data['batch_id']}</strong> reached its expiration date on <strong>{sel_lot_data['expiry_date']}</strong> ({days_diff} days past expiry). Quarantine immediately.
+                    </div>
+                    """)
+
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    discard_qty = st.number_input(
+                        "Units to Discard / Quarantine",
+                        min_value=1.0,
+                        max_value=float(sel_lot_data['quantity_on_hand']),
+                        value=float(sel_lot_data['quantity_on_hand']),
+                        step=1.0,
+                        key="discard_qty_input",
+                        help=f"Maximum units available to discard: {sel_lot_data['quantity_on_hand']:.0f}"
+                    )
+                with dc2:
+                    discard_date = st.date_input(
+                        "Disposal / Quarantine Date",
+                        value=as_of_date,
+                        key="discard_date_input"
+                    )
+
+                reason_options = [
+                    "Manufacturer Expiry Reached (Formal Destruction / Incineration)",
+                    "Vendor Credit Return (RMA / Supplier Credit Note)",
+                    "Damaged Packaging / Broken Bottle / Compromised Seal",
+                    "Regulatory Recall / Batch Quality Withdrawal"
+                ]
+                sel_reason = st.selectbox("Disposal Reason", options=reason_options, key="discard_reason_select")
+                discard_notes = st.text_input("Disposal Notes / Ticket Reference (Optional)", placeholder="e.g., Authorized by Head Pharmacist / Return RMA #49281", key="discard_notes_input")
+
+                submit_discard = st.form_submit_button("🗑️ Confirm Quarantine & Deduct from Shelf Stock", use_container_width=True, type="primary")
+
+                if submit_discard:
+                    try:
+                        full_reason = f"{sel_reason} - {discard_notes.strip()}" if discard_notes.strip() else sel_reason
+                        res = discard_batch_stock(
+                            batch_id=sel_lot_data['batch_id'],
+                            units_to_discard=discard_qty,
+                            disposal_date=str(discard_date),
+                            reason=full_reason
+                        )
+                        st.success(f"✅ Successfully quarantined & deducted {res['discarded']:,.0f} units of Batch {res['batch_id']} ({res['product_name']}) from physical inventory! Remaining batch stock: {res['remaining']:,.0f} units.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error executing stock write-off: {e}")
+
+        # Immutable Audit Movements Table for Waste / RMA
+        if recent_waste_movements:
+            render_html("<div style='margin-top: 24px;'></div>")
+            with st.expander(f"📜 View Recent Physical Disposal & Quarantine Audit Trail ({len(recent_waste_movements)} entries)", expanded=False):
+                waste_rows_html = ""
+                for wm in recent_waste_movements:
+                    waste_rows_html += f"""
+                    <tr>
+                        <td style="vertical-align: middle; color: #a4b7a7; font-family: monospace;">#{wm['movement_id']}</td>
+                        <td style="vertical-align: middle; color: #fdfbf7; font-size: 0.84rem;">{wm['movement_date']}</td>
+                        <td style="vertical-align: middle;"><code style="background: rgba(0,0,0,0.3); padding: 3px 6px; border-radius: 4px; color: #ede4d3;">{wm['batch_id']}</code></td>
+                        <td style="vertical-align: middle; color: #fdfbf7; font-weight: 600;">{wm['product_name']}</td>
+                        <td style="text-align: right; vertical-align: middle;"><strong style="color: #fca5a5;">{wm['quantity_change']:,.0f}</strong> <span style="font-size: 0.74rem; color: #a4b7a7;">units</span></td>
+                        <td style="vertical-align: middle; color: #c5d4c8; font-size: 0.8rem;">{wm['notes']}</td>
+                    </tr>
+                    """
+                render_html(f"""
+                <table class="custom-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 8%;">Log ID</th>
+                            <th style="width: 12%;">Date</th>
+                            <th style="width: 15%;">Batch LOT</th>
+                            <th style="width: 25%;">Medicine Name</th>
+                            <th style="width: 15%; text-align: right;">Quantity</th>
+                            <th style="width: 25%;">Reason / Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {waste_rows_html}
+                    </tbody>
+                </table>
+                """)
+
+    # -------------------------------------------------------------------------
+    # VENUE 4: REGISTER BRAND NEW MEDICINE & CATEGORY
     # -------------------------------------------------------------------------
     elif st.session_state.pos_active_drawer == "medicine":
         render_html("""
         <div class="pos-glass-card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">➕ Operation 3: Register Brand New Medicine</h3>
+                <h3 style="margin: 0; font-size: 1.35rem; color: #fbf7ef;">➕ Operation 4: Register Brand New Medicine</h3>
                 <span class="electric-pill">Formulary Expansion</span>
             </div>
             <div style="font-size: 0.85rem; color: #b5c7b8;">

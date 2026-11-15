@@ -9,7 +9,10 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
-from db import init_db, seed_products, add_batch, log_sales_bulk_atomic, get_daily_sales_for_date
+from db import (
+    init_db, seed_products, add_batch, log_sales_bulk_atomic, 
+    get_daily_sales_for_date, discard_batch_stock
+)
 
 TEST_DB_PATH = Path(__file__).resolve().parent.parent / "pharmacy_test_bulk.db"
 
@@ -66,3 +69,41 @@ def test_bulk_dispense_multi_medicine():
     comb_sale = next(s for s in day_sales if s['product_id'] == 6)
     assert dolo_sale['units_sold'] == 40.0
     assert comb_sale['units_sold'] == 15.0
+
+def test_discard_batch_stock():
+    # Discard 20 units of LOT-DOLO-EARLY (starts at 30 units)
+    res = discard_batch_stock('LOT-DOLO-EARLY', 20.0, '2020-05-02', 'Expired Quarantine Test', db_path=TEST_DB_PATH)
+    assert res['batch_id'] == 'LOT-DOLO-EARLY'
+    assert res['discarded'] == 20.0
+    assert res['remaining'] == 10.0
+
+    # Verify inventory_batches deduction
+    conn = sqlite3.connect(TEST_DB_PATH)
+    cur = conn.cursor()
+    rem = cur.execute("SELECT quantity_on_hand FROM inventory_batches WHERE batch_id='LOT-DOLO-EARLY'").fetchone()[0]
+    assert rem == 10.0
+
+    # Verify audit movement row
+    mv = cur.execute("""
+        SELECT movement_type, quantity_change, notes 
+        FROM stock_movements 
+        WHERE batch_id='LOT-DOLO-EARLY' AND movement_type='EXPIRED_WASTE'
+    """).fetchone()
+    conn.close()
+    assert mv is not None
+    assert mv[0] == 'EXPIRED_WASTE'
+    assert mv[1] == -20.0
+    assert 'Expired Quarantine Test' in mv[2]
+
+    # Discard remaining 10 units
+    res2 = discard_batch_stock('LOT-DOLO-EARLY', 10.0, '2020-05-03', db_path=TEST_DB_PATH)
+    assert res2['remaining'] == 0.0
+
+    # Attempting to discard from a 0-stock batch raises ValueError
+    with pytest.raises(ValueError, match="0 units remaining"):
+        discard_batch_stock('LOT-DOLO-EARLY', 5.0, '2020-05-04', db_path=TEST_DB_PATH)
+
+    # Attempting to discard a non-existent batch raises ValueError
+    with pytest.raises(ValueError, match="not found"):
+        discard_batch_stock('LOT-NONEXISTENT', 5.0, '2020-05-04', db_path=TEST_DB_PATH)
+

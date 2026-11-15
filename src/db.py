@@ -263,6 +263,71 @@ def add_batch(batch_id: str, product_id: int, initial_qty: float, received_date:
     finally:
         conn.close()
 
+def discard_batch_stock(
+    batch_id: str, 
+    units_to_discard: float, 
+    disposal_date: str, 
+    reason: str = "Expired stock quarantine & write-off", 
+    db_path: Path = DB_PATH
+) -> Dict[str, Any]:
+    """
+    Atomically removes/quarantines expired, damaged, or recalled stock from physical inventory:
+    1. Validates that the batch exists and has quantity_on_hand > 0.
+    2. Deducts min(quantity_on_hand, units_to_discard) from inventory_batches.
+    3. Logs an audit movement into stock_movements with movement_type = 'EXPIRED_WASTE'.
+    4. Commits transaction and returns deduction summary.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    try:
+        clean_lot = batch_id.strip()
+        cursor.execute("""
+            SELECT b.batch_id, b.product_id, b.quantity_on_hand, b.expiry_date, p.name AS product_name
+            FROM inventory_batches b
+            JOIN products p ON b.product_id = p.product_id
+            WHERE b.batch_id = ?;
+        """, (clean_lot,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Batch LOT '{clean_lot}' not found in inventory.")
+        
+        current_stock = float(row['quantity_on_hand'])
+        if current_stock <= 0:
+            raise ValueError(f"Batch LOT '{clean_lot}' has 0 units remaining in stock.")
+            
+        deduct_qty = min(current_stock, float(units_to_discard))
+        if deduct_qty <= 0:
+            raise ValueError("Units to discard must be greater than 0.")
+            
+        new_stock = current_stock - deduct_qty
+        
+        # 1. Deduct stock from physical inventory batch
+        cursor.execute(
+            "UPDATE inventory_batches SET quantity_on_hand = ? WHERE batch_id = ?",
+            (new_stock, clean_lot)
+        )
+        
+        # 2. Record audit movement ledger entry
+        cursor.execute("""
+            INSERT INTO stock_movements (batch_id, movement_date, movement_type, quantity_change, notes)
+            VALUES (?, ?, 'EXPIRED_WASTE', ?, ?);
+        """, (clean_lot, str(disposal_date), -deduct_qty, str(reason)))
+        
+        conn.commit()
+        return {
+            'batch_id': clean_lot,
+            'product_name': row['product_name'],
+            'discarded': deduct_qty,
+            'remaining': new_stock,
+            'disposal_date': str(disposal_date),
+            'reason': str(reason)
+        }
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
 def log_sales_bulk_atomic(sales_list: List[Dict[str, Any]], sale_date: str, db_path: Path = DB_PATH) -> Dict[str, Any]:
     """
     Atomically processes a list of dispensing entries for a given sale date:
